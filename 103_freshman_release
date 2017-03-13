@@ -1,0 +1,181 @@
+###資料準備###
+#所需套件：
+###dplyr用來處理資料
+###gmodels用來交叉分析
+###pps用來比例抽樣
+install.packages(c("dplyr","gmodels","pps"))
+
+
+##########################國中端母體簡單隨機抽樣#######################
+library(dplyr)
+PickStujr=NULL
+Xjr<-filter(X,jrstd==1)
+vecstdjr<-which(Xjr$jrstd==1)  #國中學師母體的座標系統
+Njr=round(length(Xjr$jrstd==1)*0.01)  #抽樣樣本數(預設為抽樣百分之一)
+set.seed(9);PickStujr=sample(vecstdjr,Njr,0)  #抽樣
+Xjr$stdsample=rep(0,nrow(Xjr))    #製作抽樣後的資料檔
+Xjr$stdsample[PickStujr]=1 
+
+Xjr%>%   #檢查國中抽樣後的有效樣本數
+  group_by(stdsample)%>%
+    summarise(valid=sum(TYPE,na.rm=TRUE))  #遺漏值不列入計算
+
+#用CrossTable檢查抽出樣本的分布比例是否和母體分布相當
+library(gmodels)
+CrossTable(Xjr$sex_jr,Xjr$stdsample) 
+CrossTable(Xjr$type_pubpri_jr,Xjr$stdsample)  #抽樣後的國中公私立分布
+CrossTable(Xjr$city2_jr,Xjr$stdsample) 
+
+##國中端加權
+Xjr$Wsrj=Xjr$stdsample*length(Xjr$stdsample)/sum(Xjr$stdsample)
+#加權係數為100.0094(隨機抽樣比例的倒數)
+
+
+########################高中端母體階層抽樣#########################
+Xsn<-filter(X,senstd==1)
+sch_frame=aggregate(Xsn$newcid,list(Xsn$schtype2,Xsn$shid2),length) #依學校類型、代碼aggregate出資料筆數(length)
+sch_frame=sch_frame[with(sch_frame, order(sch_frame$Group.1,-sch_frame$x)),] #排序（可不做，為了方便查看資料,小寫x是聚合後自動產生的）
+#rownames(sch_frame)=NULL #取消原順序（可不做）
+
+### Stage 1: sampling schools ###
+#給一個初始空的變項；設定整個抽樣程式的隨機種子為2（目的為可重製抽樣樣本）
+pickn=NULL;pickn0=NULL;sampleindices=NULL;pickSch=NULL;seedn=2 
+library(pps)         #引用pps套件
+#依照八個分層迴圈進行學校抽樣
+for (i in 1:8){     
+  vec=which(sch_frame$Group.1==i)  #建立各分層學校的index
+  schsize=sch_frame$x[vec]         #各分層學校數
+  pickn=round(length(schsize)*0.7) #預計抽取數(學校大小的七成)
+  pickn0=pickn                     #接下來五行，只要看ppss那行
+  repeat{
+    set.seed(seedn)
+    sampleindices<-ppss(schsize,pickn)  #使用pps
+    if(length(unique(sampleindices))==pickn0)  #控制避免抽到重複學校
+    {break     
+    }
+    pickn=pickn+1
+  }
+  print(paste0("Total: ",toString(length(schsize)),
+               "Target: ",toString(length(schsize)*0.7),
+               "Actual: ",toString(length(unique(sampleindices)))))
+  print(sch_frame$Group.2[unique(sampleindices)])
+  pickSch=c(pickSch,array(sch_frame$Group.2[vec[unique(sampleindices)]]))  #將每次抽中的學校合併在一起
+}
+print(pickSch) #顯試抽樣結果
+
+##################################################################
+#### Stage 2: sampling staudents ###
+pickStu=NULL
+for (j in 1:length(pickSch)){
+  vecsch=which(Xsn$shid2 %in% pickSch[j])  #建立抽中各校學程的指標系統
+  schdata=Xsn[vecsch,]
+  schdataagg=aggregate(schdata$TYPE,list(schdata$type_program),length) #n stu of program
+  ##only 1 program（只有一個學程的學校）
+  if (nrow(schdataagg)==1){
+    if (schdataagg$x<=40){
+      pickvec=vecsch ##all sampling全抽，若人數小於40
+    }else{
+      #some school, valid/invalid sample（學校有/無效樣本的條件判別）
+      veceff0=which(Xsn$shid2 %in% pickSch[j] & Xsn$TYPE==0)
+      veceff1=which(Xsn$shid2 %in% pickSch[j] & Xsn$TYPE==1)
+      if (length(veceff1)>=40){
+        set.seed(seedn);pickvec=sample(veceff1,40,0)
+      }else{                
+        set.seed(seedn);fillvec=sample(veceff0,40-length(veceff1),0)
+        pickvec=c(veceff1,fillvec)
+      }
+    }
+    pickStu=c(pickStu,pickvec)
+    
+    ##above 2 program（有兩個以上學程的學校）
+  }else{
+    for (s in 1:nrow(schdataagg)){ #sampling for each program該校各學程逐一抽樣
+      vecsys=which(Xsn$shid2 %in% pickSch[j] & Xsn$type_program==schdataagg$Group.1[s])
+      schsysdata=Xsn[vecsys,]
+      schsysdataagg=aggregate(schsysdata$TYPE,list(schsysdata$type_program),length) #n stu of sys
+      if (schsysdataagg$x<=20){
+        pickvec=vecsys #all sampling
+      }else{
+        #some school, valid/invalid sample
+        veceff0=which(Xsn$shid2 %in% pickSch[j] & Xsn$type_program==schsysdataagg$Group.1 & Xsn$TYPE==0)
+        veceff1=which(Xsn$shid2 %in% pickSch[j] & Xsn$type_program==schsysdataagg$Group.1 & Xsn$TYPE==1)
+        if (length(veceff1)>=20){
+          set.seed(seedn);pickvec=sample(veceff1,20,0)
+        }else{
+          set.seed(seedn);fillvec=sample(veceff0,20-length(veceff1),0)
+          pickvec=c(veceff1,fillvec)
+        }
+      }
+      pickStu=c(pickStu,pickvec)
+    }
+  }
+}
+print(pickStu)
+# 將中選樣本標註0,1 然後併入原始data
+Xsn$stusample=rep(0,nrow(Xsn))
+Xsn$stusample[pickStu]=1
+Xsn$stueff2=Xsn$TYPE*Xsn$stusample
+
+
+
+##高中端加權
+# 彙整以8類型分層、以學校為單位的資料(mi,sample,n,M)
+strmi1=aggregate(Xsn$shid2,list(Xsn$schtype,Xsn$shid2),length) #學校人數mi
+strmi2=aggregate(Xsn$stusample,list(Xsn$schtype,Xsn$shid2),max) #抽中與否
+strmi=merge(strmi1,strmi2,c("Group.1","Group.2")) #合併
+
+strM=aggregate(strmi$x.x,list(strmi$Group.1),sum) #分層人數M
+strn=aggregate(strmi$x.x,list(strmi$Group.1),length) #分層校數n
+strData=merge(strmi,strn,"Group.1") #合併
+strData=merge(strData,strM,"Group.1") #合併
+colnames(strData)=c("schtype","shid2","strmi","strsample","strn","strM")
+
+# 計算Wsch
+for (r in 1:nrow(strData)){
+  strData$Wsch[r]=strData$strM[r]/(strData$strn[r]*strData$strmi[r])*strData$strsample[r]
+}
+
+# 計算Wstu
+prgrmn=aggregate(Xsn$stusample,list(Xsn$shid2,Xsn$type_program),length) #學程內母體人數
+prgrms=aggregate(Xsn$stusample,list(Xsn$shid2,Xsn$type_program),sum) #學程內抽樣人數
+prgrmData=merge(prgrmn,prgrms,c("Group.1","Group.2"))
+prgrmData$Wstu=prgrmData$x.x/prgrmData$x.y
+
+# 計算Wadj
+prgrmv=aggregate(Xsn$stueff2,list(Xsn$shid2,Xsn$type_program),sum) #學程內有效人數
+prgrmData=merge(prgrmData,prgrmv,c("Group.1","Group.2"))
+prgrmData$Wadj=prgrmData$x.y/prgrmData$x
+colnames(prgrmData)=c("shid2","type_program","prgrm_n","prgrm_s","Wstu","prgrm_v","Wadj")
+
+# 將Wsch Wstu Wadj併回原檔
+final=merge(Xsn,strData,c("shid2"))
+final=merge(final,prgrmData,c("shid2","type_program"),all.x = TRUE) #Left join table
+final$Wsr1=final$Wsch*final$Wstu*final$Wadj*final$TYPE*final$stusample
+
+final=final[with(final,order(final$schtype,-final$strmi,final$type_program)),]
+final$Wsr1[is.na(final$Wsr1)]=0
+
+#計算事後權重Wpost(性別,學校別,學程別)
+postw_n=aggregate(final$Wsr1,list(final$stdsex,final$schtype,final$type_program),length)
+postw_s=aggregate(final$Wsr1,list(final$stdsex,final$schtype,final$type_program),sum)
+postData=merge(postw_n,postw_s,c("Group.1","Group.2","Group.3"))
+colnames(postData)=c("stdsex","schtype","type_program","post_n","post_s")
+final=merge(final,postData,c("stdsex","schtype","type_program"),all.x = TRUE)
+final$Wpost=final$TYPE*(final$post_n/final$post_s)
+final$Wsr2=final$Wsr1*final$Wpost
+#加權完人數總和sum(final$Wsr2,na.rm=T)為278,267
+
+#進行第四階段母體數校正權重
+final$Wsr3=final$Wsr2*length(final$Wsr2)/sum(final$Wsr2,na.rm=T)
+
+
+#合併國中檔和高中檔
+Xjr2=filter(Xjr,Xjr$stdsample==1)
+Xjr2=select(Xjr2,newcid,Wsrj)
+
+final2=filter(final,final$stusample==1)
+final2=select(final2,newcid,Wsr3)
+
+finalsmp=merge(final2,Xjr2,c("newcid"),all= TRUE)
+
+#輸出成CSV，再用SPSS讀取後合併回調查資料檔
